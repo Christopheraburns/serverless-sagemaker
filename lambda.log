@@ -1,0 +1,14 @@
+INFO:root:Extracting payload-parameters from the event object: {'target_field': 'Global_Sales', 'feature_list': ['rating', 'score'], 's3_bucket': 's3://serverless-sage-lz/Fake_DataSet', 'algorithm': 'XGBoost', 'user_email': 'burnsca@amazon.com'}
+INFO:root:Using xgboost built-in Algo
+INFO:root:Setting Job_id = 1537985974-530944
+INFO:root:working bucket set to: xgboost-1537985974-530944
+INFO:root:DataSet URL provided: s3://serverless-sage-lz/Fake_DataSet
+INFO:root:ObjectKey: Fake_DataSet
+INFO:root:ObjectBucket = serverless-sage-lz 
+INFO:botocore.credentials:Found credentials in shared credentials file: ~/.aws/credentials
+INFO:root:Creating S3 bucket 'xgboost-1537985974-530944' and sub directories for Training data and Model output.
+INFO:botocore.vendored.requests.packages.urllib3.connectionpool:Starting new HTTPS connection (1): xgboost-1537985974-530944.s3.amazonaws.com
+INFO:root:...s3 working bucket created successfully. Creating working bucket sub-folders...
+INFO:root:...'train' sub-folder created successfully
+INFO:botocore.vendored.requests.packages.urllib3.connectionpool:Starting new HTTPS connection (1): serverless-sage-lz.s3.amazonaws.com
+INFO:root:Streaming target dataset to working bucket...
