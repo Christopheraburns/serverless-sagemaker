@@ -4,6 +4,7 @@ import botocore
 import logging
 import io
 import time
+import xgboost
 
 # Configure logging
 statusCode = ""
@@ -103,7 +104,8 @@ def transferFile(origin_bucket, origin_key, dest_bucket, dest_key):
 
             stop = time.time()
             xferTime = stop - start
-            logger.info("dataset transferred in {} seconds".format(xferTime))
+            msg = "dataset transferred in {} seconds".format(xferTime)
+            logger.info(msg)
             statusCode = 102
 
     except botocore.exceptions.ClientError as e:
@@ -115,7 +117,7 @@ def transferFile(origin_bucket, origin_key, dest_bucket, dest_key):
             success = False
         else:
             # Something else has gone wrong.
-            msg = "Error during dataset transfer: {} ".format(e.message)
+            msg = "Error during dataset transfer: {} ".format(e)
             statusCode = 500
             logger.error(msg)
             success = False
@@ -145,6 +147,9 @@ def lambda_handler(event, context):
     """
     logger.info("Extracting payload-parameters from the event object: {}".format(event))
 
+    dataready = True
+    target_field = ""
+    feature_list = {}
     statusCode = 200
     global msg
     global origin
@@ -152,6 +157,7 @@ def lambda_handler(event, context):
     origin_key = ""
     proceed = True
 
+    # Validate API Params
     while (proceed):
 
         # Get the built-in Algorithm to use
@@ -164,16 +170,50 @@ def lambda_handler(event, context):
             break
 
         if origin not in master_algo:
-            msg = "The supplied built-in algo ({}) is not supported.  Supported \
-            algos: {} ".format(origin, master_algo)
+            msg = "The requested algo ({}) is not supported.  Supported algos: {} ".format(origin, master_algo)
             logger.error(msg)
             statusCode = 400
             break
+
+        # Get the HyperParams for this Algo
+        if origin == 'xgboost':
+            if xgboost.verify(event):
+                logger.info("Required hyperparams for selected Algo verified")
+                hyperParams = event['hyperparams']
+                logger.info(json.dumps(hyperParams))
 
         logger.info("Using {} built-in Algo".format(origin))
         logger.info("Setting Job_id = {}".format(job_id))
         working_bucket = origin + "-" + job_id
         logger.info("working bucket set to: {}".format(working_bucket))
+
+        # Do we process the DataSet as-is or do we need to prepare/validate it
+        asis = event['asisdata']
+        if asis is None: #Default to as-is
+            logger.info("Processing dataset 'AS IS'")
+            logger.info("'AS-IS processing not specified - will default to NOT preparing the dataset for Sagemaker")
+        elif asis is True:
+            logger.info("Processing dataset 'AS IS'")
+            logger.info("'AS-IS processing set to TRUE - will default to NOT preparing the dataset for Sagemaker")
+        else:
+            logger.info("'AS-IS' set to FALSE - Will attempt to prepare dataset for Sagemaker")
+            dataready = False
+            # We need Target Field & Feature_List - just check if they are in the API call - we will verify they actually
+            # exist in the data later
+            target_field = event['target_field']
+            if target_field is None:
+                msg = 'Unable to train on this dataset.  Target_Field has not been supplied'
+                logger.error(msg)
+                statusCode = 400
+                break
+            logger.info("Dataset Target Field = {}".format(target_field))
+            feature_list = event['feature_list']
+            if feature_list is None: # Default to use all fields
+                feature_list = {'all'}
+            logger.info("Using the following features of the data set:")
+            for feature in feature_list:
+                logger.info(feature)
+
 
         # Get the URL of the Dataset
         # TODO - find a way to make this extensible so origin can be anywhere - not just S3
@@ -224,15 +264,17 @@ def lambda_handler(event, context):
         "body": json.dumps(msg)
     }
 
+# Testing on Local workstation
 
+fakeCall = '{"target_field":"Global_Sales",\
+	"feature_list":["Platform","Year_of_Release", "Genre", "Publisher", "Global_Sales", "Critic_Score", "Critic_Count",\
+	"User_Score", "User_Count", "Developer", "Rating"],\
+    "s3_bucket":"s3://videogame-sales/Video_Games.csv",\
+    "algorithm":"XGBoost",\
+    "hyperparams": {"objective": "reg-linear"}, \
+    "user_email":"email@domain.com",\
+    "asisdata": "True"}'
 
-test = json.loads('{"target_field": "Global_Sales",\
-  "feature_list": [\
-    "rating",\
-    "score"\
-  ],\
-  "s3_bucket": "s3://serverless-sage-lz/Fake_DataSet",\
-  "algorithm": "XGBoost",\
-  "user_email": "burnsca@amazon.com"}')
+test = json.loads(fakeCall)
 
 lambda_handler(test, None)

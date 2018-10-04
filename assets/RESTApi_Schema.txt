@@ -1,0 +1,14 @@
+Incoming JSON sample: {'target_field':'Global_Sales','feature_list':[‘rating’,’score’],
+    's3_bucket':'bucket_name','algorithm':'XGBoost','user_email':'email@domain.com'
+
+
+{
+	"target_field":"Global_Sales",
+	"feature_list":["Platform","Year_of_Release", "Genre", "Publisher", "Global_Sales", "Critic_Score", "Critic_Count",
+	"User_Score", "User_Count", "Developer", "Rating"],
+    "s3_bucket":"s3://videogame-sales/[sub-dir]/Video_Games.csv",
+    "algorithm":"XGBoost",
+    "hyperparams": {"objective": "reg-linear"}, 
+    "user_email":"email@domain.com",
+    "asisdata": "True"
+}
