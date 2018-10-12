@@ -1364,7 +1364,7 @@ class TestDataFrameFormatting(object):
         assert result == expected
 
     def test_to_string_ascii_error(self):
-        data = [('0  ', u('                        ..gitignore '), u('     5 '),
+        data = [('0  ', u('                        .gitignore '), u('     5 '),
                  ' \xe2\x80\xa2\xe2\x80\xa2\xe2\x80'
                  '\xa2\xe2\x80\xa2\xe2\x80\xa2')]
         df = DataFrame(data)

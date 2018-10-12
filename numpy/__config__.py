@@ -15,11 +15,11 @@ if sys.platform == 'win32' and os.path.isdir(extra_dll_dir):
 
 blas_mkl_info={}
 blis_info={}
-openblas_info={'library_dirs': ['C:\\projects\\numpy-wheels\\numpy\\build\\openblas'], 'libraries': ['openblas'], 'language': 'f77', 'define_macros': [('HAVE_CBLAS', None)]}
-blas_opt_info={'library_dirs': ['C:\\projects\\numpy-wheels\\numpy\\build\\openblas'], 'libraries': ['openblas'], 'language': 'f77', 'define_macros': [('HAVE_CBLAS', None)]}
+openblas_info={'libraries': ['openblas', 'openblas'], 'library_dirs': ['/usr/local/lib'], 'language': 'c', 'define_macros': [('HAVE_CBLAS', None)]}
+blas_opt_info={'libraries': ['openblas', 'openblas'], 'library_dirs': ['/usr/local/lib'], 'language': 'c', 'define_macros': [('HAVE_CBLAS', None)]}
 lapack_mkl_info={}
-openblas_lapack_info={'library_dirs': ['C:\\projects\\numpy-wheels\\numpy\\build\\openblas'], 'libraries': ['openblas'], 'language': 'f77', 'define_macros': [('HAVE_CBLAS', None)]}
-lapack_opt_info={'library_dirs': ['C:\\projects\\numpy-wheels\\numpy\\build\\openblas'], 'libraries': ['openblas'], 'language': 'f77', 'define_macros': [('HAVE_CBLAS', None)]}
+openblas_lapack_info={'libraries': ['openblas', 'openblas'], 'library_dirs': ['/usr/local/lib'], 'language': 'c', 'define_macros': [('HAVE_CBLAS', None)]}
+lapack_opt_info={'libraries': ['openblas', 'openblas'], 'library_dirs': ['/usr/local/lib'], 'language': 'c', 'define_macros': [('HAVE_CBLAS', None)]}
 
 def get_info(name):
     g = globals()

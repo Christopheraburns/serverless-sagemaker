@@ -13,12 +13,21 @@ import logging
 import io
 import time
 import smbuiltin
+import pandas as pd
+import numpy as np
+import helper
 
 # A few global variables
-statusCode = ""
-msg = ""
-origin = ""  # Set the origin equal to the Algo that is being requested
-max_dataset = 933000000  # 933MB tested
+statusCode = ""                 # HTTP statuscode to return to APIGateway
+msg = ""                        # Message to include with HTTP StatusCode in response to caller
+origin = ""                     # The Algorithm that is being requested for training
+prepped_max_dataset = 400000000 # Dataset must be 400Mb or under for Lambda to prep
+asis_max_dataset = 933000000    # 933MB tested for maximum passthrough dataset size
+asis = False                    # Flag to indicate if dataset will be prepped or sent directly to Sagemaker "AS-IS"
+ttl = 299                       # Lifespan of an instance of this Lambda Function (in seconds)
+currentAge = 0                  # Track current age of this Lambda function (in seconds)
+data = None                     # Pandas dataframe form of our original dataset
+timemgmt = []                   # keep a list of the time taken by each method
 
 # Configure logging
 logging.basicConfig(filename='lambda.log', level=logging.DEBUG)
@@ -31,7 +40,7 @@ job_id = str(time.time()).replace(".", "-")
 working_bucket = ""
 
 
-# Master Built-in list (incoming API calls must use one of these)
+# Master Built-in list (incoming API calls must use one of these Algorithms or return an error)
 master_algo = {"kmeans", "pca", "lda", "factorization-machines", "linear-learner", \
                "ntm", "randomcutforest", "seq2seq", "xgboost", "object-detection", \
                "image-classification", "forecasting-deepar", "blazingtext", "knn"}
@@ -199,6 +208,53 @@ def createLambdaFunction():
         logger.error("unable to create a lambda function: Exiting. err: {}".format(err))
 """
 
+# Replace the variable data with numeric data
+def encodeString(column, kv):
+    frame_len = len(data)
+    for x in range(0, frame_len):
+        target = data.iloc[x, data.columns.get_loc(column)]
+        newValue = kv[target]
+        data.iloc[x, data.columns.get_loc(column)] = newValue
+
+
+
+def getNameIndex(column):
+
+    columnnames = list()
+    success = True
+    uniqueindex = 0
+    logging.info("\t encoding column: {}".format(column))
+    try:
+        # Create the array of unique column values
+        for index, row in data.iterrows():
+            if row[column] not in columnnames:
+                columnnames.append(row[column])
+            uniqueindex += 1
+
+        unique_names = len(columnnames)
+
+        index = [None] * unique_names
+        uniqueindex = 0
+        for i in range(0, unique_names):
+            index[i] = i
+            uniqueindex += 1
+
+        name_index = dict(zip(columnnames, index))
+    except Exception as err:
+        success = False
+        msg = "Error creating value-encoding key pair. Row# {} : {}".format(uniqueindex, err)
+        statusCode = 500
+
+    return success, name_index
+
+
+def prepareForTraining():
+    # Create the sleeper lambda function
+    # create sleeper function trigger
+    # link the trigger to S3 and the sleeper
+    print("prepareForTraining - called - no functionality yet")
+
+
 
 def createS3Bucket(bucket):
     """Create an S3 bucket based on the Job-ID with a training sub-folder
@@ -208,32 +264,15 @@ def createS3Bucket(bucket):
 
     s3 = boto3.client('s3')
     try:
-        logger.info("Creating S3 bucket '{}' and sub directories for Training data and Model output.".format(bucket))
+        logger.info("Creating S3 bucket '{}' for Training data and Model output.".format(bucket))
         s3CreateResponse = s3.create_bucket(
             ACL='private',
             Bucket=bucket
         )
         if str(s3CreateResponse).__contains__(bucket):  # Bucket created successfully
-            logger.info("...s3 working bucket created successfully. Creating working bucket sub-folders...")
+            logger.info("...s3 working bucket created successfully.")
     except Exception as err:
         msg = "Unable to create S3 working bucket.  Exiting.  Err: {}".format(err)
-        logger.error(msg)
-        statusCode = 500
-        return False
-
-    # Create S3 bucket "train" sub-folder
-    try:
-        prefixOneCreateResponse = s3.put_object(
-            Bucket=bucket,
-            Body='',
-            Key='train' + '/'
-        )
-        if str(prefixOneCreateResponse).__contains__("'HTTPStatusCode': 200"):
-            logger.info("...'train' sub-folder created successfully")
-        else:
-            raise ValueError("unable to create s3 'train' sub-directory: {}".format(prefixOneCreateResponse))
-    except Exception as err:
-        msg = "s3 'train' sub-directory not created.  Exiting. Err: {}".format(err)
         logger.error(msg)
         statusCode = 500
         return False
@@ -242,14 +281,16 @@ def createS3Bucket(bucket):
 
 
 def transferFile(origin_bucket, origin_key, dest_bucket, dest_key):
-    """Transfer the dataset from a source location to a correctly structured.
+    """Transfer the dataset from a source location to a working
     S3 bucket
     """
-    success = True
+    start = time.time()
     global statusCode
     global msg
+    global currentAge
+
     try:
-        start = time.time()
+
         s3 = boto3.resource('s3')
         s3_client = boto3.client('s3')
         poke = s3_client.list_objects_v2(
@@ -260,60 +301,205 @@ def transferFile(origin_bucket, origin_key, dest_bucket, dest_key):
             if obj['Key'] == origin_key:
                 keySize = obj['Size']
 
-        if keySize > max_dataset:
-            success = False
-            msg = "ML Factory currently supports only datasets under 1GB in size"
-            logger.info(msg)
-            statusCode = 413
-            return success
-        else:  # Transfer the dataset to the working S3 directory
-            logger.info("Streaming target dataset to working bucket...")
+        if asis is True:
+            if keySize > asis_max_dataset:
+                msg = "ML Factory currently only supports passthrough datasets under 933MB in size"
+                logger.info(msg)
+                statusCode = 413
+                return False
+        else:
+            if keySize > prepped_max_dataset:
+                msg = "ML Factory currently only supports prepping datasets under 401MB in size"
+                logger.info(msg)
+                statusCode = 413
+                return False
 
-            s3 = boto3.resource('s3')
-            bucket = s3.Bucket(origin_bucket)
-            obj = bucket.Object(origin_key)
+        # Transfer the dataset to the working S3 directory
+        logger.info("Streaming target dataset to working bucket...")
 
-            # Read into memory (don't write to disk)
-            buffer = io.BytesIO(obj.get()['Body'].read())
+        s3 = boto3.resource('s3')
+        bucket = s3.Bucket(origin_bucket)
+        obj = bucket.Object(origin_key)
 
-            # buffer.seek(0)
-            s3.Object(dest_bucket, dest_key).upload_fileobj(buffer)
+        # Read into memory (don't write to disk)
+        buffer = io.BytesIO(obj.get()['Body'].read())
 
-            stop = time.time()
-            xferTime = stop - start
-            msg = "dataset transferred in {} seconds".format(xferTime)
-            logger.info(msg)
-            statusCode = 102
+        # buffer.seek(0)
+        s3.Object(dest_bucket, dest_key).upload_fileobj(buffer)
+
+
+        statusCode = 102
+        stop = time.time()
+        currentAge += (stop - start)
+        msg = "dataset transferred in {} seconds".format(stop - start)
+        logger.info(msg)
 
     except botocore.exceptions.ClientError as e:
         if e.response['Error']['Code'] == "404":
             # The object does not exist.
+            stop = time.time()
+            currentAge += (stop - start)
             msg = "Object: {} does not exist!".format(origin_key)
             statusCode = 404
             logger.error(msg)
-            success = False
+            return False
         else:
             # Something else has gone wrong.
+            stop = time.time()
+            currentAge += (stop - start)
             msg = "Error during dataset transfer: {} ".format(e)
             statusCode = 500
             logger.error(msg)
-            success = False
-        raise
-
+            return False
     except Exception as err:
+        stop = time.time()
+        currentAge += (stop - start)
         msg = "Unable to transfer Dataset to S3! {}".format(err)
         statusCode = 500
         logger.error(msg)
-        success = False
+        return False
 
-    return success
+    return True
 
 
-def preprareForTraining(algo, target, features):
-    print("Safe to Prepare dataset for SageMaker training")
-    # TODO - probably need a function for each built in to make certain the minimum requirements
-    # for that particular built-in are met.
-    # make sure the dataset is in shape for training.
+def preprareDataset(algo, target, features, bucket, key):
+    global statusCode
+    global msg
+    global currentAge
+    global data
+
+    allfields = False
+    start = time.time()
+    try:
+        logging.info("copying dataset to local storage...")
+        #  download dataset to /tmp
+        s3 = boto3.client('s3')
+        s3.download_file(bucket, key, '/tmp/' + key)
+        logging.info("...dataset downloaded to local storage.")
+
+        #  load into pandas
+        logging.info("importing dataset into Pandas dataframe...")
+        data = pd.read_csv('/tmp/' + key)
+
+        # verify Target_field is present
+        if target in data.columns:
+            logging.info("Target_Field: {} column IS present in dataset".format(target))
+            # do we train on all features or just specific features?
+            if 'allfields' not in features: # Assuming a specific feature list has been provided
+                # verify Feature_list values are in dataset
+                for feature in features:
+                    if feature not in data.columns:
+                        msg = "{} feature not present but expected for training. Unable to prepare dataset".format(feature)
+                        logging.error(msg)
+                        statusCode = 400
+                        return False
+            else: # no need to verify if features exist - use all features
+                allfields = True
+                logging.info("Training on all features of the dataset")
+        else:
+            msg = "Unable to prepate dataset. Target Field: {} not found in this dataset".format(target)
+            logging.error(msg)
+            statusCode = 400
+            stop = time.time()
+            currentAge += (stop - start)
+            return False
+
+        # drop columns that aren't needed
+        if not allfields:
+            for column in data:
+                if column not in features:  # drop this column
+                    logging.info("Dropping the {} column".format(column))
+                    data = data.drop(columns=[column])
+                    logging.info(data.shape)
+
+        # Create missing value report
+        nulls = (data.isnull().sum() / len(data)) * 100
+
+        deleteNulls = []
+        # Check if features with more than 20% missing values are in our training feature list
+        if allfields:  # check all features for missing values
+            for index, val in nulls.iteritems():
+                if val > 50:
+                    deleteNulls.append(index)
+                    logging.info("{} feature has {}% missing values, will delete null rows".format(index, val))
+
+        else:
+            for feature in features:  # check features in feature list for missing values
+                if nulls[feature] > 50:
+                    deleteNulls.append(feature)
+                    logging.info("training feature '{}' is missing {}% of it's values. will delete null rows".format(feature,
+                                                                                                round(nulls[feature])))
+
+        logging.info("deleting obsersvations from columns with greater than 50% null values...")
+        logging.info("Dataset shape prior to deletion: {}".format(data.shape))
+        for d in deleteNulls:
+            data = data.dropna(subset=[d])
+        logging.info("Dateset shape after deletion: {}".format(data.shape))
+
+        # Determine column types - we can't train on object (string) types
+        logging.info("Determining column data types - we cannot train on string values without encoding them")
+        toEncode = []
+        dt = data.dtypes
+        for index, val in dt.iteritems():
+            logging.info("{} feature is probably a(n) {} data type".format(index, val))
+            if str(val) == 'object':
+                toEncode.append(index)
+
+        # See if any columns from our feature list are on the 'to-encode' list - encode if applicable
+        logging.info("encoding categorical columns...")
+        if allfields:
+            # encode all fields of type object
+            for column in data:
+                result, name_index = getNameIndex(column)
+                if result is True:
+                    encodeString(column, name_index)
+                else:
+                    return  False
+        else:
+            for feature in features:
+                if feature in toEncode:
+                    result, name_index = getNameIndex(feature)
+                    if result is True:
+                        encodeString(feature, name_index)
+                    else:
+                        return False
+
+
+        # Create correlation report
+        logging.info("generating correlation report...")
+        corrRep = data.corr()
+        logging.info(corrRep)
+
+        logging.info("Splitting into train, validation and test sets...")
+        # create training, validation and test sets
+        train_data, validation_data, test_data = np.split(data.sample(frac=1, random_state=1729),
+                                                              [int(0.7 * len(data)), int(0.9 * len(data))])
+
+        logging.info("Moving {} column to be the first column in the training dataset".format(target))
+        # create unified training dataset from target_field and features
+        pd.concat([train_data[target], train_data.drop([target], axis=1)], axis=1).to_csv('/tmp/train.csv',index=False,
+                                                                                                          header=False)
+        logging.info("Moving {} column to be the first column in the validation dataset".format(target))
+        pd.concat([validation_data[target], validation_data.drop([target], axis=1)], axis=1).to_csv('/tmp/validation.csv',
+                                                                                                    index=False,
+                                                                                                           header=False)
+        # move train and validation files to S3
+        boto3.Session().resource('s3').Bucket(working_bucket).Object('train/train.csv').upload_file('/tmp/train.csv')
+        boto3.Session().resource('s3').Bucket(working_bucket).Object('validation/validation.csv').upload_file('/tmp/validation.csv')
+
+    except Exception as err:
+        msg = "Unable to prepare dataset for training: {}".format(err)
+        logging.error(msg)
+        statusCode = 500
+        stop = time.time()
+        logging.info("prepareDataset method took {} seconds".format(stop - start))
+        currentAge += (stop - start)
+        return False
+
+    stop = time.time()
+    logging.info("prepareDataset method took {} seconds".format(stop-start))
+    currentAge += (stop - start)
+    return True
 
 
 def validateAPI(event):
@@ -328,9 +514,9 @@ def validateAPI(event):
     global origin_bucket
     global origin_key
     global working_bucket
+    global asis
 
     statusCode = 200
-    dataready = True
     target_field = ""
     feature_list = {}
 
@@ -370,33 +556,40 @@ def validateAPI(event):
     logger.info("working bucket set to: {}".format(working_bucket))
 
     # Do we process the DataSet as-is or do we need to prepare/validate it
-    asis = event['asisdata']
-    if asis is None:  # Default to as-is
+    if 'asisdata' not in event: # Default to AS-IS, even if not parameter is no provided
         logger.info("Processing dataset 'AS IS'")
         logger.info("'AS-IS processing not specified - will default to NOT preparing the dataset for Sagemaker")
-    elif asis is True:
+        asis = True
+    else:
+        asis = event['asisdata']
+
+    if asis is True:
         logger.info("Processing dataset 'AS IS'")
-        logger.info("'AS-IS processing set to TRUE - will default to NOT preparing the dataset for Sagemaker")
+        logger.info("'AS-IS' processing set to TRUE - will NOT prepare the dataset for Sagemaker")
     else:
         logger.info("'AS-IS' set to FALSE - Will attempt to prepare dataset for Sagemaker")
-        dataready = False
-        #  We need Target Field & Feature_List - just check if they are in the API call - we will verify they
-        #  actually exist in the data later
 
-        target_field = event['target_field']
-        if target_field is None:
-            msg = 'Unable to train on this dataset.  Target_Field has not been supplied'
+        #  We need Target Field & Feature_List params to prepare the dataset - just check if they are in the API call
+        #  we will verify they actually exist in the dataset later
+
+        if 'target_field' not in event:
+            msg = "Unable to prepare this dataset to train.  'Target_Field' has not been supplied"
             logger.error(msg)
             statusCode = 400
             return False
+        else:
+            target_field = event['target_field']
+            logger.info("Dataset Target Field = {}".format(target_field))
 
-        logger.info("Dataset Target Field = {}".format(target_field))
-        feature_list = event['feature_list']
-        if feature_list is None:  # Default to use all fields
-            feature_list = {'all'}
+        if 'feature_list' not in event: # Default to use all fields
+            feature_list = json.loads('{"allfields": "data"}')
+        else:
+            feature_list = event['feature_list']
+
         logger.info("Using the following features of the data set:")
         for feature in feature_list:
-            logger.info(feature)
+            logger.info("\t {}".format(feature))
+
 
     # Get the URL of the Dataset
     # TODO - Make this extensible so origin can be anywhere - not just S3
@@ -443,14 +636,24 @@ def lambda_handler(event, context):
 
     # Validate the API call is structured properly
     if validateAPI(event):
+        logging.info("Total elapsed time (in seconds): {}".format(currentAge))
         # Create the Working Directory
         if createS3Bucket(working_bucket):
+            logging.info("Total elapsed time (in seconds): {}".format(currentAge))
             # Copy the Dataset to the Working directory
-            if transferFile(origin_bucket, origin_key, working_bucket,'train/' + origin_key):
-                preprareForTraining(origin, event['target_field'], event['feature_list'])
-        else:
-            statusCode = 500
-            msg = "Unable to transfer dataset"
+            if transferFile(origin_bucket, origin_key, working_bucket, origin_key):
+                logging.info("Total elapsed time (in seconds): {}".format(currentAge))
+                # Check for Process as-is flag
+                if asis is True:
+                    prepareForTraining()
+                    logging.info("Total elapsed time (in seconds): {}".format(currentAge))
+                    # sagemakerTrain()
+                else:
+                    preprareDataset(origin, event['target_field'], event['feature_list'], working_bucket, origin_key)
+                    logging.info("Total elapsed time (in seconds): {}".format(currentAge))
+                    prepareForTraining()
+                    # sagemakerTrain()
+
 
     return {
         "statusCode": statusCode,
@@ -459,7 +662,7 @@ def lambda_handler(event, context):
 
 
 # Below code for Testing on Local workstation - comment out before uploading to AWS Lambda or lambda_handler runs twice
-
+"""
 fakeCall = '{"target_field":"Global_Sales",\
 	"feature_list":["Platform","Year_of_Release", "Genre", "Publisher", "Global_Sales", "Critic_Score", "Critic_Count",\
 	"User_Score", "User_Count", "Developer", "Rating"],\
@@ -474,3 +677,5 @@ test = json.loads(fakeCall)
 localResult = lambda_handler(test, None)
 
 print(localResult)
+
+"""
