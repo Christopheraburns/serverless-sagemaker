@@ -6,7 +6,8 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER I
 OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 """
 import json
-
+import sagemaker
+from sagemaker import get_execution_role
 
 
 class XGBoost():
@@ -57,5 +58,50 @@ class XGBoost():
                            "following: https://github.com/dmlc/xgboost/blob/master/doc/parameter.rst#learning-task-parameters"
 
 
+    def getcontainer(self, region):
+        """
+        xgboost specific code goes here to set up the training container
+        :param region:
+        :return:
+        """
+        from sagemaker.amazon.amazon_estimator import get_image_uri
+
+        container = get_image_uri(region, 'xgboost')
+
+        return container
 
 
+    def buildtrainer(self, container, bucket, session):
+        """
+        build a sagemaker train specific to this built-in algo
+        :return:
+        """
+
+        # get the ARN of the executing role (to pass to Sagemaker for training)
+        role = get_execution_role()
+
+        trainer = sagemaker.estimator.Estimator(container,
+                                                role,
+                                                train_instance_count=1,
+                                                train_instance_type='ml.m4.xlarge',
+                                                output_path='s3://{}'.format(bucket),
+                                                sagemaker_session=session)
+
+        return trainer
+
+
+    def sethyperparameters(self, trainer, hyperparams):
+        """
+        set xgboost specific hyperparameters here
+        :param trainer:
+        :return:
+        """
+        trainer.set_hyperparameters(max_depth=5,
+                                    eta=0.2,
+                                    gamma=4,
+                                    min_child_weight=6,
+                                    subsample=0.8,
+                                    silent=0,
+                                    objective=hyperparams['objective'],
+                                    eval_metric='rmse',
+                                    num_round=100)

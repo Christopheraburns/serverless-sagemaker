@@ -16,18 +16,26 @@ import smbuiltin
 import pandas as pd
 import numpy as np
 import helper
+import sagemaker
+
+
+
 
 # A few global variables
-statusCode = ""                 # HTTP statuscode to return to APIGateway
-msg = ""                        # Message to include with HTTP StatusCode in response to caller
-origin = ""                     # The Algorithm that is being requested for training
-prepped_max_dataset = 400000000 # Dataset must be 400Mb or under for Lambda to prep
-asis_max_dataset = 933000000    # 933MB tested for maximum passthrough dataset size
-asis = False                    # Flag to indicate if dataset will be prepped or sent directly to Sagemaker "AS-IS"
-ttl = 299                       # Lifespan of an instance of this Lambda Function (in seconds)
-currentAge = 0                  # Track current age of this Lambda function (in seconds)
-data = None                     # Pandas dataframe form of our original dataset
-timemgmt = []                   # keep a list of the time taken by each method
+statusCode = ""                     # HTTP statuscode to return to APIGateway
+msg = ""                            # Message to include with HTTP StatusCode in response to caller
+origin = ""                         # The Algorithm that is being requested for training
+prepped_max_dataset = 400000000     # Dataset must be 400Mb or under for Lambda to prep
+asis_max_dataset = 933000000        # 933MB tested for maximum passthrough dataset size
+asis = False                        # Flag to indicate if dataset will be prepped or sent directly to Sagemaker "AS-IS"
+ttl = 299                           # Lifespan of an instance of this Lambda Function (in seconds)
+currentAge = 0                      # Track current age of this Lambda function (in seconds)
+data = None                         # Pandas dataframe form of our original dataset
+timemgmt = []                       # keep a list of the time taken by each method
+target_field = ""                   # Column to run predictoin on
+feature_list = {}                   # Columns to keep for training
+train_instance_type = 'ml.m4.xlarge'# TODO - add API param to configure instance type AND instance count
+hyperparams = {}                    # list of hyperparams to pass on to training algo
 
 # Configure logging
 logging.basicConfig(filename='lambda.log', level=logging.DEBUG)
@@ -39,46 +47,37 @@ output_location = ""
 job_id = str(time.time()).replace(".", "-")
 working_bucket = ""
 
-
 # Master Built-in list (incoming API calls must use one of these Algorithms or return an error)
 master_algo = {"kmeans", "pca", "lda", "factorization-machines", "linear-learner", \
                "ntm", "randomcutforest", "seq2seq", "xgboost", "object-detection", \
                "image-classification", "forecasting-deepar", "blazingtext", "knn"}
 
-
-"""
 def sagemakerTrain():
+    global job_id
+    global working_bucket
+    global origin
+    global hyperparams
+
     try:
-        # get the ARN of the executing role (to pass to Sagemaker for training)
-        role = 'arn:aws:iam::056149205531:role/service-role/AmazonSageMaker-ExecutionRole-20180112T102983'
-        s3_train_data = 's3://{}/train/{}'.format(bucket, dataset)
-        container = get_image_uri(boto3.Session().region_name, 'linear-learner')
+        s3_train_data = 's3://{}/train'.format(working_bucket)
 
         session = sagemaker.Session()
 
-        # set up the training params
-        linear = sagemaker.estimator.Estimator(container,
-                                               role,
-                                               train_instance_count=1,
-                                               train_instance_type='ml.c4.xlarge',
-                                               output_path=output_location,
-                                               sagemaker_session=session)
+        # Set up the training for this Algo
+        if origin == 'xgboost':
+            xgboost = smbuiltin.XGBoost()
+            container = xgboost.getcontainer(boto3.Session().region_name)
+            trainer = xgboost.buildtrainer(container, working_bucket, session)
+            # set up the hyperparameters
+            trainer = xgboost.sethyperparameters(trainer, hyperparams)
 
-        # set up the hyperparameters
-        linear.set_hyperparameters(feature_dim=13,
-                                   predictor_type='regressor',
-                                   epochs=10,
-                                   loss='absolute_loss',
-                                   optimizer='adam',
-                                   mini_batch_size=200)
-
-        linear.fit({'train': s3_train_data}, wait=False)
-
+            trainer.fit({'train': s3_train_data}, wait=False)
 
     except Exception as err:
         logger.error("Error while launching SageMaker training: {}".format(err))
         
-        
+"""
+
 def createLambdaTrigger():
     config = "<NotificationConfiguration><CloudFunctionConfiguration>"
     config += "<Filter><S3Key><FilterRule>"
@@ -215,7 +214,6 @@ def encodeString(column, kv):
         target = data.iloc[x, data.columns.get_loc(column)]
         newValue = kv[target]
         data.iloc[x, data.columns.get_loc(column)] = newValue
-
 
 
 def getNameIndex(column):
@@ -490,7 +488,6 @@ def preprareDataset(algo, target, features, bucket, key):
     except Exception as err:
         msg = "Unable to prepare dataset for training: {}".format(err)
         logging.error(msg)
-        statusCode = 500
         stop = time.time()
         logging.info("prepareDataset method took {} seconds".format(stop - start))
         currentAge += (stop - start)
@@ -515,103 +512,103 @@ def validateAPI(event):
     global origin_key
     global working_bucket
     global asis
-
+    global job_id
+    global target_field
+    global feature_list
+    global hyperparams
     statusCode = 200
-    target_field = ""
-    feature_list = {}
+
 
     logger.info("Extracting payload-parameters from the event object: {}".format(event))
-
-    # Get the built-in Algorithm to use
-    if 'algorithm' not in event:
-        msg = "Built-in algo to use not supplied in the parameters"
-        logger.error(msg)
-        statusCode = 400
-        return False
-    else:
-        origin = event['algorithm']
-        origin = origin.lower()
-
-    if origin not in master_algo:
-        msg = "The requested algo ({}) is not supported.  Supported algos: {} ".format(origin, master_algo)
-        logger.error(msg)
-        statusCode = 400
-        return False
-
-    # Get the HyperParams for this Algo
-    if origin == 'xgboost':
-        xgboost = smbuiltin.XGBoost(event)
-        xgboost.verify()
-        result = xgboost.verified
-        xmsg = xgboost.msg
-        if result is False:
-            msg = "Required parameter values for running XGboost not detected or incorrect: {}".format(xmsg)
-            logger.error(msg)
-            statusCode = 400
-            return False
-
-    logger.info("Using {} built-in Algo".format(origin))
-    logger.info("Setting Job_id = {}".format(job_id))
-    working_bucket = origin + "-" + job_id
-    logger.info("working bucket set to: {}".format(working_bucket))
-
-    # Do we process the DataSet as-is or do we need to prepare/validate it
-    if 'asisdata' not in event: # Default to AS-IS, even if not parameter is no provided
-        logger.info("Processing dataset 'AS IS'")
-        logger.info("'AS-IS processing not specified - will default to NOT preparing the dataset for Sagemaker")
-        asis = True
-    else:
-        asis = event['asisdata']
-
-    if asis is True:
-        logger.info("Processing dataset 'AS IS'")
-        logger.info("'AS-IS' processing set to TRUE - will NOT prepare the dataset for Sagemaker")
-    else:
-        logger.info("'AS-IS' set to FALSE - Will attempt to prepare dataset for Sagemaker")
-
-        #  We need Target Field & Feature_List params to prepare the dataset - just check if they are in the API call
-        #  we will verify they actually exist in the dataset later
-
-        if 'target_field' not in event:
-            msg = "Unable to prepare this dataset to train.  'Target_Field' has not been supplied"
-            logger.error(msg)
-            statusCode = 400
-            return False
-        else:
-            target_field = event['target_field']
-            logger.info("Dataset Target Field = {}".format(target_field))
-
-        if 'feature_list' not in event: # Default to use all fields
-            feature_list = json.loads('{"allfields": "data"}')
-        else:
-            feature_list = event['feature_list']
-
-        logger.info("Using the following features of the data set:")
-        for feature in feature_list:
-            logger.info("\t {}".format(feature))
-
-
-    # Get the URL of the Dataset
-    # TODO - Make this extensible so origin can be anywhere - not just S3
-
-    if 's3_bucket' not in event:
-        msg = "Unable to proceed. Dataset URL not found in the parameters - Fatal Error"
-        logger.error(msg)
-        statusCode = 400
-        return False
-    else:
-        dataset = event['s3_bucket']
-        dataset = str(dataset)
-
-    # Make sure S3 object path is provided correctly
-    if "s3" not in dataset.lower():
-        msg = "Unable to proceed. Dataset URL not formatted correctly - \
-            requires: s3://bucket-name/[sub-directory]/objectname - Fatal Error"
-        logger.error(msg)
-        statusCode = 400
-        return False
-
     try:
+        event = json.loads(event)
+        logger.info("Setting Job_id = {}".format(job_id))
+
+
+        # Get the built-in Algorithm to use
+        if 'algorithm' not in event:
+            msg = "Built-in algo to use not supplied in the parameters"
+            logger.error(msg)
+            return False
+        else:
+            origin = event['algorithm']
+            origin = origin.lower()
+            logger.info("Using {} built-in Algo".format(origin))
+            working_bucket = origin + "-" + job_id
+            logger.info("working bucket set to: {}".format(working_bucket))
+
+        if origin not in master_algo:
+            msg = "The requested algo ({}) is not supported.  Supported algos: {} ".format(origin, master_algo)
+            logger.error(msg)
+            return False
+
+        # Get the HyperParams for this Algo
+        if origin == 'xgboost':
+            xgboost = smbuiltin.XGBoost(event)
+            xgboost.verify()
+            result = xgboost.verified
+            xmsg = xgboost.msg
+            if result is False:
+                msg = "Required parameter values for running XGboost not detected or incorrect: {}".format(xmsg)
+                logger.error(msg)
+                return False
+            else:
+                logger.info("Minimum requirements to support a(n) {} training session found".format(origin))
+                hyperparams = event['hyperparams']
+
+        # Do we process the DataSet as-is or do we need to prepare/validate it
+        if 'asisdata' not in event: # Default to AS-IS, even if not parameter is no provided
+            logger.info("Processing dataset 'AS IS'")
+            logger.info("'AS-IS processing not specified - will default to NOT preparing the dataset for Sagemaker")
+            asis = True
+        else:
+            asis = event['asisdata']
+
+        if asis is True:
+            logger.info("Processing dataset 'AS IS'")
+            logger.info("'AS-IS' processing set to TRUE - will NOT prepare the dataset for Sagemaker")
+        else:
+            logger.info("'AS-IS' set to FALSE - Will attempt to prepare dataset for Sagemaker")
+
+            #  We need Target Field & Feature_List params to prepare the dataset - just check if they are in the API call
+            #  we will verify they actually exist in the dataset later
+
+            if 'target_field' not in event:
+                msg = "Unable to prepare this dataset to train.  'Target_Field' has not been supplied"
+                logger.error(msg)
+                return False
+            else:
+                target_field = event['target_field']
+                logger.info("Dataset Target Field = {}".format(target_field))
+
+            if 'feature_list' not in event: # Default to use all fields
+                feature_list = json.loads('{"allfields": "data"}')
+            else:
+                feature_list = event['feature_list']
+
+            logger.info("Using the following features of the data set:")
+            for feature in feature_list:
+                logger.info("\t {}".format(feature))
+
+
+        # Get the URL of the Dataset
+        # TODO - Make this extensible so origin can be anywhere - not just S3
+
+        if 's3_bucket' not in event:
+            msg = "Unable to proceed. Dataset URL not found in the parameters - Fatal Error"
+            logger.error(msg)
+            return False
+        else:
+            dataset = event['s3_bucket']
+            dataset = str(dataset)
+
+        # Make sure S3 object path is provided correctly
+        if "s3" not in dataset.lower():
+            msg = "Unable to proceed. Dataset URL not formatted correctly - \
+                requires: s3://bucket-name/[sub-directory]/objectname - Fatal Error"
+            logger.error(msg)
+            return False
+
         logger.info("DataSet URL provided: {}".format(dataset))
         pcs = dataset.split('/')
         origin_key = pcs[(len(pcs) - 1)]
@@ -620,11 +617,8 @@ def validateAPI(event):
         origin_bucket = dataset[5:lastChar]
         logger.info("ObjectBucket = {} ".format(origin_bucket))
     except Exception as err:
-        msg = "Unable to proceed. Unable to parse Datset Origin URL - \
-            required format: s3://bucket-name/[sub-directory]/objectname - \
-            Error: {}".format(err)
+        msg = "Unable to proceed. Unable to parse Datset. Error: {}".format(err)
         logger.error(msg)
-        statusCode = 400
         return False
 
     return True
@@ -633,32 +627,63 @@ def validateAPI(event):
 def lambda_handler(event, context):
     global statusCode
     global msg
+    global job_id
+    global target_field
+    global feature_list
 
-    # Validate the API call is structured properly
-    if validateAPI(event):
-        logging.info("Total elapsed time (in seconds): {}".format(currentAge))
-        # Create the Working Directory
-        if createS3Bucket(working_bucket):
-            logging.info("Total elapsed time (in seconds): {}".format(currentAge))
-            # Copy the Dataset to the Working directory
-            if transferFile(origin_bucket, origin_key, working_bucket, origin_key):
-                logging.info("Total elapsed time (in seconds): {}".format(currentAge))
-                # Check for Process as-is flag
-                if asis is True:
-                    prepareForTraining()
+
+    dyn = boto3.resource('dynamodb')
+    #table = dyn.Table('tableau_int')
+    logging.info("ss_process function triggered with stream: {}".format(event))
+    #logging.info("Querying DynamoDB for the ")
+    # goto Dynamo and query the table based on the job_id in the event object
+    try:
+        #make sure this is only an Insert event from Dynamodb
+        eventType = event['Records'][0]['eventName']
+        logging.info("Eventtype = {}".format(eventType))
+        if eventType == 'INSERT':
+            job_id = event['Records'][0]['dynamodb']['NewImage']['job_id']['S']
+            logging.info("Found job_id: {}".format(job_id))
+
+            # isolate the DynamoDB entry
+            payload = event['Records'][0]['dynamodb']['NewImage']
+            if payload is None:
+                statusCode = 500
+                msg = "unable to read API request data from DynamoDB"
+            else:
+                logging.info("Deserializing original API call payload: {} ...".format(payload))
+
+                deserializer = boto3.dynamodb.types.TypeDeserializer()
+                event = {k: deserializer.deserialize(v) for k,v in payload.items()}
+
+                # Validate the API call is structured properly
+                if validateAPI(event['payload']):
                     logging.info("Total elapsed time (in seconds): {}".format(currentAge))
-                    # sagemakerTrain()
-                else:
-                    preprareDataset(origin, event['target_field'], event['feature_list'], working_bucket, origin_key)
-                    logging.info("Total elapsed time (in seconds): {}".format(currentAge))
-                    prepareForTraining()
-                    # sagemakerTrain()
+                    # Create the Working Directory
+                    if createS3Bucket(working_bucket):
+                        logging.info("Total elapsed time (in seconds): {}".format(currentAge))
+                        # Copy the Dataset to the Working directory
+                        if transferFile(origin_bucket, origin_key, working_bucket, origin_key):
+                            logging.info("Total elapsed time (in seconds): {}".format(currentAge))
+                            # Check for Process as-is flag
+                            if asis is True:
+                                prepareForTraining()
+                                logging.info("Total elapsed time (in seconds): {}".format(currentAge))
+                                # sagemakerTrain()
+                            else:
+                                preprareDataset(origin, target_field, feature_list, working_bucket, origin_key)
+                                logging.info("Total elapsed time (in seconds): {}".format(currentAge))
+                                prepareForTraining()
+                                # sagemakerTrain()
 
+                                logging.info("Training process initiated, exiting function")
 
-    return {
-        "statusCode": statusCode,
-        "body": json.dumps(msg)
-    }
+    except Exception as err:
+        msg = "Unable to process API request: {}".format(err)
+        logging.error(msg)
+
+        #TODO add an SMS call to notify of errors
+
 
 
 # Below code for Testing on Local workstation - comment out before uploading to AWS Lambda or lambda_handler runs twice
