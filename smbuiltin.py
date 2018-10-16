@@ -105,3 +105,5 @@ class XGBoost():
                                     objective=hyperparams['objective'],
                                     eval_metric='rmse',
                                     num_round=100)
+
+        return trainer

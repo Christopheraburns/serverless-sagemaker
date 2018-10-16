@@ -15,27 +15,25 @@ import time
 import smbuiltin
 import pandas as pd
 import numpy as np
-import helper
 import sagemaker
 
 
-
-
 # A few global variables
-statusCode = ""                     # HTTP statuscode to return to APIGateway
-msg = ""                            # Message to include with HTTP StatusCode in response to caller
-origin = ""                         # The Algorithm that is being requested for training
-prepped_max_dataset = 400000000     # Dataset must be 400Mb or under for Lambda to prep
-asis_max_dataset = 933000000        # 933MB tested for maximum passthrough dataset size
-asis = False                        # Flag to indicate if dataset will be prepped or sent directly to Sagemaker "AS-IS"
-ttl = 299                           # Lifespan of an instance of this Lambda Function (in seconds)
-currentAge = 0                      # Track current age of this Lambda function (in seconds)
-data = None                         # Pandas dataframe form of our original dataset
-timemgmt = []                       # keep a list of the time taken by each method
-target_field = ""                   # Column to run predictoin on
-feature_list = {}                   # Columns to keep for training
-train_instance_type = 'ml.m4.xlarge'# TODO - add API param to configure instance type AND instance count
-hyperparams = {}                    # list of hyperparams to pass on to training algo
+statusCode = ""                         # HTTP statuscode to return to APIGateway
+msg = ""                                # Message to include with HTTP StatusCode in response to caller
+origin = ""                             # The Algorithm that is being requested for training
+prepped_max_dataset = 400000000         # Dataset must be 400Mb or under for Lambda to prep
+asis_max_dataset = 933000000            # 933MB tested for maximum passthrough dataset size
+asis = False                            # Flag indicating if dataset will be prepped or sent directly to Sagemaker "AS-IS"
+ttl = 299                               # Lifespan of an instance of this Lambda Function (in seconds)
+currentAge = 0                          # Track current age of this Lambda function (in seconds)
+data = None                             # Pandas dataframe form of our original dataset
+timemgmt = []                           # keep a list of the time taken by each method
+target_field = ""                       # Column to run predictions on
+feature_list = {}                       # Columns to keep for training
+train_instance_type = 'ml.m4.xlarge'    # TODO - add API param to configure instance type AND instance count
+hyperparams = {}                        # list of hyperparams to pass on to training algo
+topicArn = ""                           # ARN of SNS Topic for notifications
 
 # Configure logging
 logging.basicConfig(filename='lambda.log', level=logging.DEBUG)
@@ -52,7 +50,24 @@ master_algo = {"kmeans", "pca", "lda", "factorization-machines", "linear-learner
                "ntm", "randomcutforest", "seq2seq", "xgboost", "object-detection", \
                "image-classification", "forecasting-deepar", "blazingtext", "knn"}
 
-def sagemakerTrain():
+
+def sendSNSMsg(msg, subject):
+
+    global topicArn
+
+    try:
+        sns = boto3.client('sns')
+
+        rPublish = sns.publish(
+            TopicArn=topicArn,
+            Message=msg,
+            Subject=subject
+        )
+    except Exception as err:
+        logger.error("sendSNSMsg::{}".format(err))
+
+
+def sagemakerTrain(event):
     global job_id
     global working_bucket
     global origin
@@ -60,24 +75,27 @@ def sagemakerTrain():
 
     try:
         s3_train_data = 's3://{}/train'.format(working_bucket)
+        logger.info("Initiating Sagemaker training with data from {}".format(s3_train_data))
 
         session = sagemaker.Session()
 
         # Set up the training for this Algo
         if origin == 'xgboost':
-            xgboost = smbuiltin.XGBoost()
+            xgboost = smbuiltin.XGBoost(event)
             container = xgboost.getcontainer(boto3.Session().region_name)
             trainer = xgboost.buildtrainer(container, working_bucket, session)
             # set up the hyperparameters
             trainer = xgboost.sethyperparameters(trainer, hyperparams)
 
             trainer.fit({'train': s3_train_data}, wait=False)
+        else:
+            logger.error("sagemakerTrain::Serverlesss Sagemaker process does not support the {} algorithm.".format(origin))
 
     except Exception as err:
-        logger.error("Error while launching SageMaker training: {}".format(err))
-        
-"""
+        logger.error("sagemakerTrain::Error while launching SageMaker training: {}".format(err))
 
+
+"""
 def createLambdaTrigger():
     config = "<NotificationConfiguration><CloudFunctionConfiguration>"
     config += "<Filter><S3Key><FilterRule>"
@@ -207,13 +225,17 @@ def createLambdaFunction():
         logger.error("unable to create a lambda function: Exiting. err: {}".format(err))
 """
 
+
 # Replace the variable data with numeric data
 def encodeString(column, kv):
-    frame_len = len(data)
-    for x in range(0, frame_len):
-        target = data.iloc[x, data.columns.get_loc(column)]
-        newValue = kv[target]
-        data.iloc[x, data.columns.get_loc(column)] = newValue
+    try:
+        frame_len = len(data)
+        for x in range(0, frame_len):
+            target = data.iloc[x, data.columns.get_loc(column)]
+            newValue = kv[target]
+            data.iloc[x, data.columns.get_loc(column)] = newValue
+    except Exception as err:
+        logger.error("encodeString::Error encoding string: {}".format(err))
 
 
 def getNameIndex(column):
@@ -221,8 +243,9 @@ def getNameIndex(column):
     columnnames = list()
     success = True
     uniqueindex = 0
-    logging.info("\t encoding column: {}".format(column))
+
     try:
+        logging.info("\t encoding column: {}".format(column))
         # Create the array of unique column values
         for index, row in data.iterrows():
             if row[column] not in columnnames:
@@ -241,27 +264,30 @@ def getNameIndex(column):
     except Exception as err:
         success = False
         msg = "Error creating value-encoding key pair. Row# {} : {}".format(uniqueindex, err)
-        statusCode = 500
+        logger.error("getNameIndex::" + msg)
 
     return success, name_index
 
 
-def prepareForTraining():
-    # Create the sleeper lambda function
-    # create sleeper function trigger
-    # link the trigger to S3 and the sleeper
-    print("prepareForTraining - called - no functionality yet")
+def prepareForTraining(event):
 
+    try:
+        logger.info("preparing sleeper Lambda function...")
+        # create sleeper function trigger
+        # link the trigger to S3 and the sleeper
+        sagemakerTrain(event)
+    except Exception as err:
+        logger.error("prepareForTraining:: Error while creating and linking lambda sleeper function: {}".format(err))
 
 
 def createS3Bucket(bucket):
-    """Create an S3 bucket based on the Job-ID with a training sub-folder
+    """Create an S3 bucket based on the Job-ID
     """
     global statusCode
     global msg
 
-    s3 = boto3.client('s3')
     try:
+        s3 = boto3.client('s3')
         logger.info("Creating S3 bucket '{}' for Training data and Model output.".format(bucket))
         s3CreateResponse = s3.create_bucket(
             ACL='private',
@@ -271,8 +297,7 @@ def createS3Bucket(bucket):
             logger.info("...s3 working bucket created successfully.")
     except Exception as err:
         msg = "Unable to create S3 working bucket.  Exiting.  Err: {}".format(err)
-        logger.error(msg)
-        statusCode = 500
+        logger.error("createS3Bucket::" + msg)
         return False
 
     return True
@@ -282,13 +307,13 @@ def transferFile(origin_bucket, origin_key, dest_bucket, dest_key):
     """Transfer the dataset from a source location to a working
     S3 bucket
     """
-    start = time.time()
+
     global statusCode
     global msg
     global currentAge
 
     try:
-
+        start = time.time()
         s3 = boto3.resource('s3')
         s3_client = boto3.client('s3')
         poke = s3_client.list_objects_v2(
@@ -325,8 +350,6 @@ def transferFile(origin_bucket, origin_key, dest_bucket, dest_key):
         # buffer.seek(0)
         s3.Object(dest_bucket, dest_key).upload_fileobj(buffer)
 
-
-        statusCode = 102
         stop = time.time()
         currentAge += (stop - start)
         msg = "dataset transferred in {} seconds".format(stop - start)
@@ -338,35 +361,34 @@ def transferFile(origin_bucket, origin_key, dest_bucket, dest_key):
             stop = time.time()
             currentAge += (stop - start)
             msg = "Object: {} does not exist!".format(origin_key)
-            statusCode = 404
-            logger.error(msg)
+            logger.error("transferFile::" + msg)
             return False
         else:
             # Something else has gone wrong.
             stop = time.time()
             currentAge += (stop - start)
             msg = "Error during dataset transfer: {} ".format(e)
-            statusCode = 500
-            logger.error(msg)
+            logger.error("transferFile::" + msg)
             return False
     except Exception as err:
         stop = time.time()
         currentAge += (stop - start)
         msg = "Unable to transfer Dataset to S3! {}".format(err)
-        statusCode = 500
-        logger.error(msg)
+        logger.error("transferFile::" + msg)
         return False
 
     return True
 
 
 def preprareDataset(algo, target, features, bucket, key):
+
     global statusCode
     global msg
     global currentAge
     global data
 
     allfields = False
+
     start = time.time()
     try:
         logging.info("copying dataset to local storage...")
@@ -383,11 +405,12 @@ def preprareDataset(algo, target, features, bucket, key):
         if target in data.columns:
             logging.info("Target_Field: {} column IS present in dataset".format(target))
             # do we train on all features or just specific features?
-            if 'allfields' not in features: # Assuming a specific feature list has been provided
+            if 'allfields' not in features:  # Assuming a specific feature list has been provided
                 # verify Feature_list values are in dataset
                 for feature in features:
                     if feature not in data.columns:
-                        msg = "{} feature not present but expected for training. Unable to prepare dataset".format(feature)
+                        msg = "{} feature not present but expected for training. \
+                        Unable to prepare dataset".format(feature)
                         logging.error(msg)
                         statusCode = 400
                         return False
@@ -396,8 +419,7 @@ def preprareDataset(algo, target, features, bucket, key):
                 logging.info("Training on all features of the dataset")
         else:
             msg = "Unable to prepate dataset. Target Field: {} not found in this dataset".format(target)
-            logging.error(msg)
-            statusCode = 400
+            logging.error("preprareDataset::" + msg)
             stop = time.time()
             currentAge += (stop - start)
             return False
@@ -425,8 +447,8 @@ def preprareDataset(algo, target, features, bucket, key):
             for feature in features:  # check features in feature list for missing values
                 if nulls[feature] > 50:
                     deleteNulls.append(feature)
-                    logging.info("training feature '{}' is missing {}% of it's values. will delete null rows".format(feature,
-                                                                                                round(nulls[feature])))
+                    logging.info("training feature '{}' is missing {}% of it's values. will delete null \
+                    rows".format(feature,round(nulls[feature])))
 
         logging.info("deleting obsersvations from columns with greater than 50% null values...")
         logging.info("Dataset shape prior to deletion: {}".format(data.shape))
@@ -462,7 +484,6 @@ def preprareDataset(algo, target, features, bucket, key):
                     else:
                         return False
 
-
         # Create correlation report
         logging.info("generating correlation report...")
         corrRep = data.corr()
@@ -478,16 +499,17 @@ def preprareDataset(algo, target, features, bucket, key):
         pd.concat([train_data[target], train_data.drop([target], axis=1)], axis=1).to_csv('/tmp/train.csv',index=False,
                                                                                                           header=False)
         logging.info("Moving {} column to be the first column in the validation dataset".format(target))
-        pd.concat([validation_data[target], validation_data.drop([target], axis=1)], axis=1).to_csv('/tmp/validation.csv',
-                                                                                                    index=False,
-                                                                                                           header=False)
+        pd.concat([validation_data[target], validation_data.drop([target], axis=1)], axis=1).to_csv(
+            '/tmp/validation.csv',index=False,header=False)
+
         # move train and validation files to S3
         boto3.Session().resource('s3').Bucket(working_bucket).Object('train/train.csv').upload_file('/tmp/train.csv')
-        boto3.Session().resource('s3').Bucket(working_bucket).Object('validation/validation.csv').upload_file('/tmp/validation.csv')
+        boto3.Session().resource('s3').Bucket(working_bucket).Object('validation/validation.csv').upload_file(
+            '/tmp/validation.csv')
 
     except Exception as err:
         msg = "Unable to prepare dataset for training: {}".format(err)
-        logging.error(msg)
+        logging.error("preprareDataset::" + msg)
         stop = time.time()
         logging.info("prepareDataset method took {} seconds".format(stop - start))
         currentAge += (stop - start)
@@ -516,19 +538,18 @@ def validateAPI(event):
     global target_field
     global feature_list
     global hyperparams
-    statusCode = 200
 
-
-    logger.info("Extracting payload-parameters from the event object: {}".format(event))
     try:
+        logger.info("Extracting payload-parameters from the event object: {}".format(event))
+
+        # Convert event object back to a dict from str
         event = json.loads(event)
         logger.info("Setting Job_id = {}".format(job_id))
-
 
         # Get the built-in Algorithm to use
         if 'algorithm' not in event:
             msg = "Built-in algo to use not supplied in the parameters"
-            logger.error(msg)
+            logger.error("validateAPI::" + msg)
             return False
         else:
             origin = event['algorithm']
@@ -539,7 +560,7 @@ def validateAPI(event):
 
         if origin not in master_algo:
             msg = "The requested algo ({}) is not supported.  Supported algos: {} ".format(origin, master_algo)
-            logger.error(msg)
+            logger.error("validateAPI::" + msg)
             return False
 
         # Get the HyperParams for this Algo
@@ -550,7 +571,7 @@ def validateAPI(event):
             xmsg = xgboost.msg
             if result is False:
                 msg = "Required parameter values for running XGboost not detected or incorrect: {}".format(xmsg)
-                logger.error(msg)
+                logger.error("validateAPI::" + msg)
                 return False
             else:
                 logger.info("Minimum requirements to support a(n) {} training session found".format(origin))
@@ -575,7 +596,7 @@ def validateAPI(event):
 
             if 'target_field' not in event:
                 msg = "Unable to prepare this dataset to train.  'Target_Field' has not been supplied"
-                logger.error(msg)
+                logger.error("validateAPI::" + msg)
                 return False
             else:
                 target_field = event['target_field']
@@ -596,7 +617,7 @@ def validateAPI(event):
 
         if 's3_bucket' not in event:
             msg = "Unable to proceed. Dataset URL not found in the parameters - Fatal Error"
-            logger.error(msg)
+            logger.error("validateAPI::" + msg)
             return False
         else:
             dataset = event['s3_bucket']
@@ -606,7 +627,7 @@ def validateAPI(event):
         if "s3" not in dataset.lower():
             msg = "Unable to proceed. Dataset URL not formatted correctly - \
                 requires: s3://bucket-name/[sub-directory]/objectname - Fatal Error"
-            logger.error(msg)
+            logger.error("validateAPI::" + msg)
             return False
 
         logger.info("DataSet URL provided: {}".format(dataset))
@@ -618,13 +639,54 @@ def validateAPI(event):
         logger.info("ObjectBucket = {} ".format(origin_bucket))
     except Exception as err:
         msg = "Unable to proceed. Unable to parse Datset. Error: {}".format(err)
-        logger.error(msg)
+        logger.error("validateAPI::" + msg)
         return False
 
     return True
 
 
+def setupSNS(event):
+
+    try:
+        sns = boto3.client('sns')
+
+        logger.info('Creating the SNS topic for severless-sagemaker notifications')
+
+        # Create the Topic (does nothing if it already exists)
+        rtopic = sns.create_topic(
+            Name='serverless-sagemaker-topic'
+        )
+
+        # get the ARN from the create_topic response
+        rtopicArn = rtopic['TopicArn']
+
+        # Create the Subscription if not already subscribed
+        isSubscribed = sns.list_subscriptions_by_topic(
+            TopicArn=rtopicArn
+        )
+
+        subscribe = True
+
+        subs = isSubscribed['Subscriptions']
+
+        for sub in subs:
+            if sub['Endpoint'] == event['user_email']:
+                # This email is already subscribed - do not create a new subscription
+                subscribe = False
+
+        if subscribe:
+            rSubscribe = sns.subscribe(
+                TopicArn=rtopicArn,
+                Protocol='email',
+                Endpoint=event['user_email']
+            )
+
+    except Exception as err:
+        logger.error("setupSNS::Error creating topic or subscribing to SNS: {}".format(err))
+
+
 def lambda_handler(event, context):
+
     global statusCode
     global msg
     global job_id
@@ -632,31 +694,37 @@ def lambda_handler(event, context):
     global feature_list
 
 
-    dyn = boto3.resource('dynamodb')
-    #table = dyn.Table('tableau_int')
-    logging.info("ss_process function triggered with stream: {}".format(event))
-    #logging.info("Querying DynamoDB for the ")
-    # goto Dynamo and query the table based on the job_id in the event object
     try:
-        #make sure this is only an Insert event from Dynamodb
+        logging.info("ss_process function triggered with stream: {}".format(event))
+
+        # make sure this is only an Insert event from Dynamodb
         eventType = event['Records'][0]['eventName']
         logging.info("Eventtype = {}".format(eventType))
+
         if eventType == 'INSERT':
             job_id = event['Records'][0]['dynamodb']['NewImage']['job_id']['S']
             logging.info("Found job_id: {}".format(job_id))
 
-            # isolate the DynamoDB entry
+            # isolate the DynamoDB entry from the DynamoDB stream/event data
             payload = event['Records'][0]['dynamodb']['NewImage']
             if payload is None:
-                statusCode = 500
                 msg = "unable to read API request data from DynamoDB"
+                logger.error(msg)
+                raise ValueError(msg + " review CloudWatch logs")
             else:
                 logging.info("Deserializing original API call payload: {} ...".format(payload))
 
+                # lazy-eval dynamodb
+                boto3.resource('dynamodb')
+
+                # Convert from 'Dynamodb' type to dict
                 deserializer = boto3.dynamodb.types.TypeDeserializer()
                 event = {k: deserializer.deserialize(v) for k,v in payload.items()}
 
-                # Validate the API call is structured properly
+                # Set up the notification framework in the event of an error
+                setupSNS(event)
+
+                # Validate that the API call is structured properly
                 if validateAPI(event['payload']):
                     logging.info("Total elapsed time (in seconds): {}".format(currentAge))
                     # Create the Working Directory
@@ -667,22 +735,27 @@ def lambda_handler(event, context):
                             logging.info("Total elapsed time (in seconds): {}".format(currentAge))
                             # Check for Process as-is flag
                             if asis is True:
-                                prepareForTraining()
+                                prepareForTraining(event)
                                 logging.info("Total elapsed time (in seconds): {}".format(currentAge))
-                                # sagemakerTrain()
                             else:
                                 preprareDataset(origin, target_field, feature_list, working_bucket, origin_key)
                                 logging.info("Total elapsed time (in seconds): {}".format(currentAge))
-                                prepareForTraining()
-                                # sagemakerTrain()
-
+                                prepareForTraining(event)
                                 logging.info("Training process initiated, exiting function")
+                        else:
+                            raise ValueError("transferFile::Unable to transfer dataset to s3 working bucket - review \
+                            CloudWatch logs")
+                    else:
+                        raise ValueError("createS3Bucket::Unable to create a working directory on S3 - \
+                        review CloudWatch logs")
+                else:
+                    raise ValueError("validateAPI::API request structured incorrectly (HTTP 400) - review \
+                    CloudWatch logs")
 
     except Exception as err:
-        msg = "Unable to process API request: {}".format(err)
+        msg = "lambda_handler::Unable to process API request: {}".format(err)
         logging.error(msg)
-
-        #TODO add an SMS call to notify of errors
+        sendSNSMsg(msg, "Serverless-SageMaker Error notification")
 
 
 
