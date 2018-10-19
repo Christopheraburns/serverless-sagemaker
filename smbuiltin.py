@@ -96,14 +96,35 @@ class XGBoost():
         :param trainer:
         :return:
         """
-        trainer.set_hyperparameters(max_depth=5,
-                                    eta=0.2,
-                                    gamma=4,
-                                    min_child_weight=6,
-                                    subsample=0.8,
-                                    silent=0,
-                                    objective=hyperparams['objective'],
-                                    eval_metric='rmse',
-                                    num_round=100)
+        #  Parameter 'objective' should be one of these options:
+        # 'reg:linear',
+        # 'reg:logistic',
+        # 'binary:logistic',
+        # 'binary:logitraw', '
+        # count:poisson', '
+        # multi:softmax',
+        # 'multi:softprob',
+        # 'rank:pairwise', '
+        # reg:gamma', '
+        # reg:tweedie'.
+
+        # but we cannot pass a colon via a JSON formatted web service. replace the - (dash) with a colon here
+
+        try:
+            obj = hyperparams['objective']
+            obj = obj.replace("-", ":")
+
+            trainer.set_hyperparameters(max_depth=5,
+                                        eta=0.2,
+                                        gamma=4,
+                                        min_child_weight=6,
+                                        subsample=0.8,
+                                        silent=0,
+                                        objective=obj,
+                                        eval_metric='rmse',
+                                        num_round=100)
+        except Exception as err:
+            print(err)
+            # TODO - pass Logger object to the smbuiltin.py modeule so it can write to the same cloudwatch log
 
         return trainer
