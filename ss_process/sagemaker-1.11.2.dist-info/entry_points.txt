@@ -1,0 +1,3 @@
+[console_scripts]
+sagemaker = sagemaker.cli.main:main
+
